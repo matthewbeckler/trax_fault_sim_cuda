@@ -13,12 +13,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 2 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License along
    with this program; if not, write to the Free Software Foundation, Inc.,
    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
@@ -44,7 +44,7 @@
    * Some way to do multiple gate evals per thread? Maybe a packed data structure? Maybe machine word-width algebraic operations like in that one DAC submission?
 
    * As mentioned above, some data storage techniques had to be migrated to a compacted storage technique, where multiple 1 or 2 bit values are stored in a single byte. This reduces the total storage required, but makes each access more complex, usually involving one or more bit shift and bitwise masking operations. It would be good to analyze the actual access patterns for these memories, and determine if functions such as "extract four consecutive values" or "extract both v1 and v2 for a given net" would be useful and faster than individual accesses. Additionally, for smaller circuits or on systems with more available memory, it would be useful to be able to automatically detect the memory size and switch between data storage formats based on the system details.
-   
+
    * There are a number of small optimizations we would like to investigate with regards to array-of-struct vs struct-of-arrays, especially in our gate and test memory storage.
 
    Update log:
@@ -90,34 +90,33 @@
     There are probably other implicit assumptions that I have forgotten about. Caveat emptor
 */
 
-// A good programmer is a lazy programmer
 #define uchar unsigned char
 #define uint unsigned int
 
 // This is the definition of all eight supported gate types. Ordering is to make the GPU code more efficient (and/nand/or/nor are commonly grouped together, same with xor/xnor)
-#define TYPE_AND 0
-#define TYPE_NAND 1
-#define TYPE_OR 2
-#define TYPE_NOR 3
-#define TYPE_BUF 4
-#define TYPE_INV 5
-#define TYPE_XOR 6
-#define TYPE_XNOR 7
+#define TYPE_AND    (0)
+#define TYPE_NAND   (1)
+#define TYPE_OR     (2)
+#define TYPE_NOR    (3)
+#define TYPE_BUF    (4)
+#define TYPE_INV    (5)
+#define TYPE_XOR    (6)
+#define TYPE_XNOR   (7)
 
 // Since we have a four-valued logic, we need two bits to represent each one.
 // I was originally trying to be creative about these assignments, to make it so that we could do gate evaluations in parallel using bit-operation instructions.
 // Which is how I decided to make 0 = 00, 1 = 11, and X and H be the other two.
 // However, since we haven't implemented parallel gate evaluations, this is kind of a moot point. However these values are indeed being used.
-#define LOGIC_0 0
-#define LOGIC_X 1
-#define LOGIC_H 2
-#define LOGIC_1 3
+#define LOGIC_0 (0)
+#define LOGIC_X (1)
+#define LOGIC_H (2)
+#define LOGIC_1 (3)
 
 // How many threads per block? Maximum is 512, make sure each is a multiple of 16, multiple of 32 is probably better.
 // Doesn't really seem to affect performance much, so something else is probably limiting the speed.
-#define FAULTS_PER_BLOCK_KERNEL_1 512
-#define FAULTS_PER_BLOCK_KERNEL_2 512
-#define FAULTS_PER_BLOCK_KERNEL_3 512
+#define FAULTS_PER_BLOCK_KERNEL_1 (512)
+#define FAULTS_PER_BLOCK_KERNEL_2 (512)
+#define FAULTS_PER_BLOCK_KERNEL_3 (512)
 
 // FYI, pointers cost 8 bytes!
 
@@ -158,30 +157,21 @@ void timeval_accumulate_diff(struct timeval *result, struct timeval *start, stru
     result->tv_usec = diff_usec % 1000000;
 }
 
-// Prints to the provided buffer a nice number of bytes (KB, MB, GB, etc)
-// TODO for bytes = 33133532 this produced "33133532 B", wtf
-// Also for 146664 and 1453208 and 2976057
+// Prints a nice number of bytes (KB, MB, GB, etc) to the provided buffer.
 void pretty_bytes(char* buf, uint bytes)
 {
-    const char* suffixes[7];
-    suffixes[0] = "B";
-    suffixes[1] = "KB";
-    suffixes[2] = "MB";
-    suffixes[3] = "GB";
-    suffixes[4] = "TB";
-    suffixes[5] = "PB";
-    suffixes[6] = "EB";
+    const char* suffixes[] = {"B", "KB", "MB", "GB", "TB", "PB", "EB"};
     uint order = 0;
     double count = bytes;
-    while (count >= 1024 && count < 7)
-    {
+    while ((count >= 1024) && (order < sizeof(suffixes))) {
         order++;
         count /= 1024;
     }
-    if (count - floor(count) == 0.0)
+    if ((count - floor(count)) == 0.0) {
         sprintf(buf, "%d %s", (int)count, suffixes[order]);
-    else
+    } else {
         sprintf(buf, "%.1f %s", count, suffixes[order]);
+    }
 }
 
 
@@ -481,6 +471,8 @@ __global__ void cuda_check_fault_activations(Gate* gates, uchar* all_states, uin
                                 (v2 == LOGIC_H) );                                 // hazard-based activation - And actually, if we are not doing TRAX fault sim, then there can be no LOGIC_H values, so this activation condition is harmless, neat!
             // argh, this is also susceptible to the problem of multiple threads writing to the same byte concurrently
             //BIT_SET_UCHAR(fault_activations, fault_id * num_tests + test_id, (activated ? 1 : 0));
+            // (TODO - This comment is talking about BIT_SET_UCHAR, right? Not the atomicOr, right?)
+
             uint index = fault_id * num_tests + test_id;
             atomicOr( ((uint*)fault_activations) + (index / 32), activated << (index % 32));
         }
@@ -504,13 +496,10 @@ __global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
         uchar* my_state = faulty_states + state_bytes * test_id;
         uint my_gate_id = fault_id / 2; // We only have to start simulating at the fault site, due to the gate ordering!
 
-        if (use_trax)
-        {
+        if (use_trax) {
             my_state[my_gate_id * 2 + 1] = LOGIC_X; // Activate the fault by marking an X at the fault site in v2
-        }
-        else
-        {
-            my_state[my_gate_id * 2 + 1] = my_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition) TODO is this correct?
+        } else {
+            my_state[my_gate_id * 2 + 1] = my_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition)
         }
 
         uchar test_failed = (gates[my_gate_id].is_output ? 1 : 0); // local copy since we'll be writing it many times, copy it to dict[fault_id * num_tests + test_id] eventually.
@@ -523,19 +512,23 @@ __global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
             uchar v2 = cuda_fault_sim_core(&g, my_state, gate_id, use_trax);
 
             if (use_trax)
+            {
                 test_failed = (g.is_output && v2 == LOGIC_X) ? 1 : test_failed; // if an X reaches an output, the test fails
+            }
             else
+            {
                 test_failed = (g.is_output && v2 != fault_free_value) ? 1 : test_failed; // if an output does not match the expected value, the test fails
+            }
         }
         uint index = (fault_list_index * num_tests) + test_id;
-        atomicOr( ((uint*)dict) + (index / 32), test_failed << (index % 32)); // TODO make this much better or somethign, cripes
+        atomicOr( ((uint*)dict) + (index / 32), test_failed << (index % 32)); // TODO make this much better or something, cripes
     }
 }
 
 void check_cuda_errors(char* kernel_name)
 {
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) 
+    if (err != cudaSuccess)
     {
         fprintf(stderr, "CUDA error in kernel %s: %s\n", kernel_name, cudaGetErrorString(err));
         exit(1);
@@ -548,6 +541,7 @@ uint divide_round_up(uint n, uint d)
     return (n + (d - 1)) / d;
 }
 
+// TODO use compile-time directives for the TRAX vs TF code to improve performance?
 
 // This is our main function.
 // It would be stellar to split the parsing code into a separate function in a separate file.
@@ -561,31 +555,33 @@ int main(int argc, char* argv[])
 
     if (argc != 3)
     {
-        fprintf(stderr, "Usage: %s basename {use_trax|use_tf}\n", argv[0]);
+        fprintf(stderr, "Usage: %s basename {trax|tf}\n", argv[0]);
         exit(1);
     }
 
     char* basename = argv[1]; // something like "c432"
-    char use_trax = (strncmp("use_trax", argv[2], 8)) == 0;
-    //printf("argv[2] = \"%s\"\n", argv[2]);
-    //printf("use_trax: %d\n", use_trax);
+    uchar use_trax = ((strncmp("trax", argv[2], 5)) == 0);
 
     char* filename_input = (char*) malloc(2 * strlen(basename) + 6 + 1); // "c432/c432.v", so 2*N + 6 for "/.easy" + 1 for the '\0'
     assert(filename_input != NULL);
     sprintf(filename_input, "%s/%s.easy", basename, basename);
     printf("Netlist filename: '%s'\n", filename_input);
 
-    char* filename_tests = (char*) malloc(2 * strlen(basename) + 7 + 1); // "c432/c432.tests", so 2*N + 7 for "/.tests" + 1 for the '\0'
+    char* filename_tests = (char*) malloc(2 * strlen(basename) + 12 + 1); // "c432/c432.tests.easy", so 2*N + 12 for "/.tests.easy" + 1 for the '\0'
     assert(filename_tests != NULL);
-    sprintf(filename_tests, "%s/%s.tests", basename, basename);
+    sprintf(filename_tests, "%s/%s.tests.easy", basename, basename);
     printf("Tests filename: '%s'\n", filename_tests);
 
     char* filename_dictionary = (char*) malloc(2 * strlen(basename) + 25 + 1); // "c432/c432.dictionary.trax.pf.cuda", so 2*N + 25 for "/.dictionary.trax.pf.cuda" + 1 for the '\0'
     assert(filename_dictionary != NULL);
     if (use_trax)
+    {
         sprintf(filename_dictionary, "%s/%s.dictionary.trax.pf.cuda", basename, basename);
+    }
     else
+    {
         sprintf(filename_dictionary, "%s/%s.dictionary.tf.pf.cuda", basename, basename);
+    }
     printf("Dictionary filename: '%s'\n", filename_dictionary);
 
     char* filename_faults = (char*) malloc(2 * strlen(basename) + 13 + 1); // "c432/c432.faults.gpu", so 2*N + 13 for "/.faults.gpu" + 1 for the '\0'
@@ -612,7 +608,7 @@ int main(int argc, char* argv[])
     // Ideally, we could just now say something like:
     // read_netlist(&num_inputs, &num_outputs, &num_gates, &num_faults, &inputs, &outputs, &gates);
     // read_tests(&num_tests, &tests);
-    // ------------- Begin "please move to separate function/file" section -------------- 
+    // ------------- Begin "please move to separate function/file" section --------------
 
     // now we need to load in our circuit netlist
     FILE* fp = fopen(filename_input, "r");
@@ -655,14 +651,14 @@ int main(int argc, char* argv[])
         }
     }
 
-    
+
     if (fscanf(fp, "NUMGATES %d\n", &num_gates) != 1)
     {
         fprintf(stderr, "Unable to parse NUMGATES line!\n");
         exit(1);
     }
 
-    // IMPORTANT - we assume that the gates in the file are already in topological order!
+    // IMPORTANT - We assume that the gates in the file are already in topological order!
     pretty_bytes(buffer, sizeof(Gate) * num_gates);
     printf("Detected %d gates (%s)\n", num_gates, buffer);
     gates = (Gate*) malloc(sizeof(Gate) * num_gates);
@@ -715,7 +711,7 @@ int main(int argc, char* argv[])
     assert(tests_v1 != NULL);
     assert(tests_v2 != NULL);
     assert(tests_expected != NULL);
-    
+
     // these buffers are just for reading from the file
     char* buf_v1 = (char*) malloc(num_inputs + 1);
     assert(buf_v1 != NULL);
@@ -779,7 +775,7 @@ int main(int argc, char* argv[])
     printf("Finished parsing files!\n");
     printf("--------------------------------------------\n");
 
-    // ------------- End "please move to separate function/file" section -------------- 
+    // ------------- End "please move to separate function/file" section --------------
 
     gettimeofday(&tvDoneParsing, NULL);
 
@@ -795,13 +791,13 @@ int main(int argc, char* argv[])
      *    value at the necessary net before fault simulation.
     ***************************************************************************/
 
-    /*_  ________ _____  _   _ ______ _        __ 
+    /*_  ________ _____  _   _ ______ _        __
     | |/ /  ____|  __ \| \ | |  ____| |      /_ |
     | ' /| |__  | |__) |  \| | |__  | |       | |
     |  < |  __| |  _  /| . ` |  __| | |       | |
     | . \| |____| | \ \| |\  | |____| |____   | |
     |_|\_\______|_|  \_\_| \_|______|______|  |_|
-    */                                              
+    */
 
     // We need to store the circuit state (v1 and v2 values for all nets) for all tests.
     uint num_nets = num_inputs + num_gates;
@@ -857,14 +853,14 @@ int main(int argc, char* argv[])
     printf("finished with fault-free responses kernel #1\n");
 
 
-/*_  ________ _____  _   _ ______ _        ___  
+/*_  ________ _____  _   _ ______ _        ___
  | |/ /  ____|  __ \| \ | |  ____| |      |__ \
  | ' /| |__  | |__) |  \| | |__  | |         ) |
- |  < |  __| |  _  /| . ` |  __| | |        / / 
- | . \| |____| | \ \| |\  | |____| |____   / /_ 
+ |  < |  __| |  _  /| . ` |  __| | |        / /
+ | . \| |____| | \ \| |\  | |____| |____   / /_
  |_|\_\______|_|  \_\_| \_|______|______| |____|
 */
-                                                
+
     // Now, at this point, we have the fault-free responses for all tests
     // From the grand plan: "2. Then, for each fault, we determine which test pairs activate the fault."
     // Each thread corresponds with a single fault, and determines which tests activate the fault
@@ -896,13 +892,13 @@ int main(int argc, char* argv[])
     check_cuda_errors("post-2 (cudaMemcpy fault_activations to CPU)");
 
 
-/*_  ________ _____  _   _ ______ _        ____  
+/*_  ________ _____  _   _ ______ _        ____
  | |/ /  ____|  __ \| \ | |  ____| |      |___ \
  | ' /| |__  | |__) |  \| | |__  | |        __) |
- |  < |  __| |  _  /| . ` |  __| | |       |__ < 
+ |  < |  __| |  _  /| . ` |  __| | |       |__ <
  | . \| |____| | \ \| |\  | |____| |____   ___) |
- |_|\_\______|_|  \_\_| \_|______|______| |____/ 
-                                                 
+ |_|\_\______|_|  \_\_| \_|______|______| |____/
+
      * 4. We do another parallel fault simulation on only the patterns that
      *    activate the fault. We also have to change each state to put the X
      *    value at the necessary net before fault simulation (sequential?). */
@@ -1008,14 +1004,12 @@ int main(int argc, char* argv[])
     gettimeofday(&tvPreK3, NULL);
     gettimeofday(&tvStep, NULL);
     cudaProfilerStart();
-    for (uint fault_list_index = 0; fault_list_index < num_faults; fault_list_index++)
-    {
+    for (uint fault_list_index = 0; fault_list_index < num_faults; fault_list_index++) {
         Fault *fault = &faults[fault_list_index];
         uint fault_id = (fault->net * 2) + fault->polarity;
 
         // it may be the case that there are no fault activations, in which case we just don't run the kernel
-        if (num_fault_activations[fault_id] > 0)
-        {
+        if (num_fault_activations[fault_id] > 0) {
             // copy a fresh copy of the fault-free states into the faulty_states
             cudaMemcpy(dev_faulty_states, dev_fault_free_states, all_states_size, cudaMemcpyDeviceToDevice);
             check_cuda_errors("pre-3 (cudaMemcpy dev_fault_free_states -> dev_faulty_states - GPU-to-GPU)");
@@ -1039,7 +1033,7 @@ int main(int argc, char* argv[])
 
         unsigned long int time_so_far_us = tvDiff.tv_usec + 1000000 * tvDiff.tv_sec;
         unsigned long int time_left_us = (long int)(((1 - progress) * time_so_far_us) / progress);
-        printf("Fault id %6d, %6d activations (%6d / %6d = %3.6f - %ld.%02ld total, %ld.%06ld step, %ld left)\n",
+        printf("\rFault id %6d, %6d activations (%6d / %6d = %3.6f - %ld.%06ld total, %ld.%06ld step, %ld left)",
                fault_id, num_fault_activations[fault_id],
                fault_list_index + 1, num_faults, progress,
                tvDiff.tv_sec, tvDiff.tv_usec,
@@ -1050,6 +1044,7 @@ int main(int argc, char* argv[])
     }
     cudaProfilerStop();
     gettimeofday(&tvPostK3, NULL);
+    printf("\n");
 
     // now write the dictionary data to disk
     cudaMemcpy(dict, dev_dict, dict_size, cudaMemcpyDeviceToHost);
@@ -1091,7 +1086,7 @@ int main(int argc, char* argv[])
 
     timeval_subtract(&tvDiff, &tvPostK3, &tvPreK3);
     printf("7. %ld.%06ld Kernel 3 loop\n", tvDiff.tv_sec, tvDiff.tv_usec);
-    
+
     timeval_subtract(&tvDiff, &tvEnd, &tvPostK3);
     printf("8. %ld.%06ld Writing dictionary to file\n", tvDiff.tv_sec, tvDiff.tv_usec);
 
