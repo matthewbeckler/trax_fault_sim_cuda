@@ -6,8 +6,8 @@
    Carnegie Mellon University
    Fall 2012
 
-   Last Updated: August 1, 2013
-   Copyright (c) 2013, Matthew Beckler
+   Last Updated: March 10, 2017
+   Copyright (c) 2013-2017, Matthew Beckler
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -49,6 +49,7 @@
 
    Update log:
    * Added support for TF faults in addition to just TRAX faults - Aug 2013
+   * Added support for disabling TRAX hazard activation - Mar 2017
 
 */
 
@@ -394,7 +395,7 @@ __constant__ uchar gate_eval_lut[128] = {
 #define TRAN100H ( (LOGIC_1 << 6) | (LOGIC_0 << 4) | (LOGIC_0 << 2) | LOGIC_H )
 #define TRAN011H ( (LOGIC_0 << 6) | (LOGIC_1 << 4) | (LOGIC_1 << 2) | LOGIC_H )
 #define TRAN10H1 ( (LOGIC_1 << 6) | (LOGIC_0 << 4) | (LOGIC_H << 2) | LOGIC_1 )
-__device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_id, uchar use_trax)
+__device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_id)
 {
     // could we transpose our state matrix to make the accesses align better? TODO
     // Each thread is accessing the same net at the same time, maybe we could make those accesses be coallesced?
@@ -407,17 +408,16 @@ __device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_i
     uchar v1 = gate_eval_lut[(g->type << 4) | (in1_v1 << 2) | (in2_v1)];
     uchar v2 = gate_eval_lut[(g->type << 4) | (in1_v2 << 2) | (in2_v2)];
 
-    if (use_trax)
-    {
-        // Now we need to detect if v2 should result in a hazard due to this gate's inputs
-        uchar merged_values = (in1_v1 << 6) | (in2_v1 << 4) | (in1_v2 << 2) | in2_v2;
-        // and/nand = 0/1, or/nor = 2/3
-        uchar hazard_and_nand = (g->type <= 1) &&                 (merged_values == TRAN0110 || merged_values == TRAN1001 || merged_values == TRAN01H0 || merged_values == TRAN100H);
-        uchar hazard_or_nor   = (g->type <= 3 && g->type >= 2) && (merged_values == TRAN0110 || merged_values == TRAN1001 || merged_values == TRAN011H || merged_values == TRAN10H1);
-        uchar hazard_xor_xnor = (g->type >  5) && (v1 == v2 && in1_v1 != in1_v2 && in2_v1 != in2_v2);
-        uchar hazard = hazard_and_nand || hazard_or_nor || hazard_xor_xnor;
-        v2 = hazard ? LOGIC_H : v2;
-    }
+#if (USE_TRAX && USE_HAZARDS)
+    // Now we need to detect if v2 should result in a hazard due to this gate's inputs
+    uchar merged_values = (in1_v1 << 6) | (in2_v1 << 4) | (in1_v2 << 2) | in2_v2;
+    // and/nand = 0/1, or/nor = 2/3
+    uchar hazard_and_nand = (g->type <= 1) &&                 (merged_values == TRAN0110 || merged_values == TRAN1001 || merged_values == TRAN01H0 || merged_values == TRAN100H);
+    uchar hazard_or_nor   = (g->type <= 3 && g->type >= 2) && (merged_values == TRAN0110 || merged_values == TRAN1001 || merged_values == TRAN011H || merged_values == TRAN10H1);
+    uchar hazard_xor_xnor = (g->type >  5) && (v1 == v2 && in1_v1 != in1_v2 && in2_v1 != in2_v2);
+    uchar hazard = hazard_and_nand || hazard_or_nor || hazard_xor_xnor;
+    v2 = hazard ? LOGIC_H : v2;
+#endif
 
     // Update my_state in place with the (potentially new) values of v1 and v2:
     // Note that unlike the reference implementation, we don't care if the values were updated, since we check all downstream gates regardless.
@@ -430,7 +430,7 @@ __device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_i
 
 // This is Kernel 1, the cuda fault-free fault simulation function. Pass in the gates, all the states (one per test), the state size, and the number of gates.
 // Updates all the states in place. One thread per test pair, FAULTS_PER_BLOCK_KERNEL_1 threads per block.
-__global__ void cuda_fault_free_fault_sim(Gate* gates, uint num_gates, uchar* all_states, uint state_bytes, uint num_tests, uchar use_trax)
+__global__ void cuda_fault_free_fault_sim(Gate* gates, uint num_gates, uchar* all_states, uint state_bytes, uint num_tests)
 {
     // each thread will go through a complete fault simulation
     // since we are not skipping around, all threads stay in lock-step
@@ -446,7 +446,7 @@ __global__ void cuda_fault_free_fault_sim(Gate* gates, uint num_gates, uchar* al
         // We iterate over all the relevant gates, in topological order (this sorting was already handled, our netlist comes pre-sorted)
         for (uint gate_id = 0; gate_id < num_gates; gate_id++)
         {
-            cuda_fault_sim_core(&gates[gate_id], my_state, gate_id, use_trax);
+            cuda_fault_sim_core(&gates[gate_id], my_state, gate_id);
         }
     }
 }
@@ -486,8 +486,7 @@ __global__ void cuda_check_fault_activations(Gate* gates, uchar* all_states, uin
 __global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
                                       uchar* faulty_states, uint state_bytes,
                                       uint my_num_fault_activations, uint my_activations_offset, uint* activating_test_ids,
-                                      uchar* dict, uint fault_list_index, uint num_tests,
-                                      uint fault_id, uchar use_trax)
+                                      uchar* dict, uint fault_list_index, uint num_tests, uint fault_id)
 {
     uint test_offset = blockIdx.x * FAULTS_PER_BLOCK_KERNEL_3 + threadIdx.x;
     if (test_offset < my_num_fault_activations)
@@ -496,11 +495,12 @@ __global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
         uchar* my_state = faulty_states + state_bytes * test_id;
         uint my_gate_id = fault_id / 2; // We only have to start simulating at the fault site, due to the gate ordering!
 
-        if (use_trax) {
-            my_state[my_gate_id * 2 + 1] = LOGIC_X; // Activate the fault by marking an X at the fault site in v2
-        } else {
-            my_state[my_gate_id * 2 + 1] = my_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition)
-        }
+        my_state[my_gate_id * 2 + 1] = 
+        #if USE_TRAX
+            LOGIC_X; // Activate the fault by marking an X at the fault site in v2
+        #else
+            my_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition)
+        #endif
 
         uchar test_failed = (gates[my_gate_id].is_output ? 1 : 0); // local copy since we'll be writing it many times, copy it to dict[fault_id * num_tests + test_id] eventually.
 
@@ -508,24 +508,20 @@ __global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
         for (uint gate_id = my_gate_id + 1; gate_id < num_gates; gate_id++) // Oh duh, start with the next gate, don't re-evaluate the gate where we just activated a fault (since it will un-activate it!)
         {
             const Gate g = gates[gate_id]; // should be the same for all threads in the kernel
-            uchar fault_free_value = my_state[gate_id * 2 + 1];
-            uchar v2 = cuda_fault_sim_core(&g, my_state, gate_id, use_trax);
+            uchar v2 = cuda_fault_sim_core(&g, my_state, gate_id);
 
-            if (use_trax)
-            {
-                test_failed = (g.is_output && v2 == LOGIC_X) ? 1 : test_failed; // if an X reaches an output, the test fails
-            }
-            else
-            {
-                test_failed = (g.is_output && v2 != fault_free_value) ? 1 : test_failed; // if an output does not match the expected value, the test fails
-            }
+        #if USE_TRAX
+            test_failed = (g.is_output && (v2 == LOGIC_X)) ? 1 : test_failed; // If an X reaches an output, the test fails
+        #else
+            test_failed = (g.is_output && (v2 != my_state[gate_id * 2 + 1])) ? 1 : test_failed; // If an output does not match the expected (fault-free) value, the test fails
+        #endif
         }
         uint index = (fault_list_index * num_tests) + test_id;
         atomicOr( ((uint*)dict) + (index / 32), test_failed << (index % 32)); // TODO make this much better or something, cripes
     }
 }
 
-void check_cuda_errors(char* kernel_name)
+void check_cuda_errors(const char *kernel_name)
 {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -553,14 +549,26 @@ int main(int argc, char* argv[])
     struct timeval tvStart, tvDoneParsing, tvPreK1, tvPostK1, tvPreK2, tvPostK2, tvPreK3, tvPostK3, tvEnd, tvDiff;
     gettimeofday(&tvStart, NULL);
 
-    if (argc != 3)
+    printf("This code built with these recognized options:\n"
+#if USE_TRAX
+           "USE_TRAX "
+#   if USE_HAZARDS
+           "USE_HAZARDS "
+#   else
+           "NO_HAZARDS "
+#   endif
+#else
+           "USE_TF "
+#endif
+           "\n");
+
+    if (argc != 2)
     {
-        fprintf(stderr, "Usage: %s basename {trax|tf}\n", argv[0]);
+        fprintf(stderr, "Usage: %s basename}\n", argv[0]);
         exit(1);
     }
 
     char* basename = argv[1]; // something like "c432"
-    uchar use_trax = ((strncmp("trax", argv[2], 5)) == 0);
 
     char* filename_input = (char*) malloc(2 * strlen(basename) + 6 + 1); // "c432/c432.v", so 2*N + 6 for "/.easy" + 1 for the '\0'
     assert(filename_input != NULL);
@@ -572,16 +580,19 @@ int main(int argc, char* argv[])
     sprintf(filename_tests, "%s/%s.tests.easy", basename, basename);
     printf("Tests filename: '%s'\n", filename_tests);
 
-    char* filename_dictionary = (char*) malloc(2 * strlen(basename) + 25 + 1); // "c432/c432.dictionary.trax.pf.cuda", so 2*N + 25 for "/.dictionary.trax.pf.cuda" + 1 for the '\0'
+    char* filename_dictionary = (char*) malloc(2 * strlen(basename) + 27 + 1); // "c432/c432.dictionary.traxnh.pf.cuda", so 2*N + 27 for "/.dictionary.traxnh.pf.cuda" + 1 for the '\0'
     assert(filename_dictionary != NULL);
-    if (use_trax)
-    {
-        sprintf(filename_dictionary, "%s/%s.dictionary.trax.pf.cuda", basename, basename);
-    }
-    else
-    {
-        sprintf(filename_dictionary, "%s/%s.dictionary.tf.pf.cuda", basename, basename);
-    }
+    sprintf(filename_dictionary,
+#if USE_TRAX
+#   if USE_HAZARDS
+    "%s/%s.dictionary.trax.pf.cuda",
+#   else
+    "%s/%s.dictionary.traxnh.pf.cuda",
+#   endif
+#else
+    "%s/%s.dictionary.tf.pf.cuda",
+#endif
+    basename, basename);
     printf("Dictionary filename: '%s'\n", filename_dictionary);
 
     char* filename_faults = (char*) malloc(2 * strlen(basename) + 13 + 1); // "c432/c432.faults.gpu", so 2*N + 13 for "/.faults.gpu" + 1 for the '\0'
@@ -847,7 +858,7 @@ int main(int argc, char* argv[])
 
     // Launch Kernel 1! We have a blocks with FAULTS_PER_BLOCK_KERNEL_1 threads, one thread for each test
     gettimeofday(&tvPreK1, NULL);
-    cuda_fault_free_fault_sim<<< divide_round_up(num_tests, FAULTS_PER_BLOCK_KERNEL_1), FAULTS_PER_BLOCK_KERNEL_1 >>>(dev_gates, num_gates, dev_fault_free_states, state_bytes, num_tests, use_trax);
+    cuda_fault_free_fault_sim<<< divide_round_up(num_tests, FAULTS_PER_BLOCK_KERNEL_1), FAULTS_PER_BLOCK_KERNEL_1 >>>(dev_gates, num_gates, dev_fault_free_states, state_bytes, num_tests);
     check_cuda_errors("1 (fault free fault simulation)");
     gettimeofday(&tvPostK1, NULL);
     printf("finished with fault-free responses kernel #1\n");
@@ -1017,7 +1028,7 @@ int main(int argc, char* argv[])
 
             uint my_activations_offset = fault_activations_offset[fault_id]; // Where we have to start in the dev_activating_test_ids for this fault
             uint num_blocks = divide_round_up(num_fault_activations[fault_id], FAULTS_PER_BLOCK_KERNEL_3);
-            cuda_faulty_fault_sim<<< num_blocks, FAULTS_PER_BLOCK_KERNEL_3 >>>(dev_gates, num_gates, dev_faulty_states, state_bytes, num_fault_activations[fault_id], my_activations_offset, dev_activating_test_ids, dev_dict, fault_list_index, num_tests, fault_id, use_trax);
+            cuda_faulty_fault_sim<<< num_blocks, FAULTS_PER_BLOCK_KERNEL_3 >>>(dev_gates, num_gates, dev_faulty_states, state_bytes, num_fault_activations[fault_id], my_activations_offset, dev_activating_test_ids, dev_dict, fault_list_index, num_tests, fault_id);
             check_cuda_errors("3 (faulty fault sim)");
             cudaDeviceSynchronize();
         }
