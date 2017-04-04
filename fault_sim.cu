@@ -48,7 +48,7 @@
    * There are a number of small optimizations we would like to investigate with regards to array-of-struct vs struct-of-arrays, especially in our gate and test memory storage.
 
    Update log:
-   * Support tracking activity of each gate over the entire test set - Mar 2017
+   * Support tracking activity of each net (and therefore PMOS input) over the entire test set - Mar 2017
    * Added support for disabling TRAX hazard activation - Mar 2017
    * Added support for TF faults in addition to just TRAX faults - Aug 2013
 
@@ -601,9 +601,9 @@ int main(int argc, char* argv[])
     sprintf(filename_faults, "%s/%s.faults.gpu", basename, basename);
     printf("Faults filename: '%s'\n", filename_faults);
 
-    char* filename_usage = (char*) malloc(2 * strlen(basename) + 12 + 1); // "c432/c432.gate_usage", so 2*N + 12 for "/.gate_usage" + 1 for the '\0'
+    char* filename_usage = (char*) malloc(2 * strlen(basename) + 7 + 1); // "c432/c432.usage", so 2*N + 7 for "/.usage" + 1 for the '\0'
     assert(filename_usage != NULL);
-    sprintf(filename_usage, "%s/%s.gate_usage", basename, basename);
+    sprintf(filename_usage, "%s/%s.usage", basename, basename);
     printf("Usage filename: '%s'\n", filename_usage);
 
     // Circuit netlist data
@@ -875,25 +875,22 @@ int main(int argc, char* argv[])
     //print_state(fault_free_states, num_state_values);
     //print_state_raw(fault_free_states, num_state_values);
 
-    //printf("num_gates: %d\n", num_gates);
-    //printf("num_tests: %d\n", num_tests);
-    //printf("looking at each gate to determine what percentage of states (2 * num_tests) it is high\n");
-    printf("Analyzing fault-free states to determine gate usage...\n");
+    printf("Analyzing fault-free states to determine usage of %d nets...\n", num_nets);
     fp = fopen(filename_usage, "w");
-    for (uint gate_id = 0; gate_id < num_gates; gate_id++) {
+    for (uint net_id = 0; net_id < num_nets; net_id++) {
         uint high_count = 0;
-        printf("\r%f", (1 + gate_id) / (1.0 * num_gates));
+        printf("\r%f", (1 + net_id) / (1.0 * num_nets));
         for (uint test_id = 0; test_id < num_tests; test_id++) {
             uchar *this_state = fault_free_states + test_id * state_bytes;
             // In the fault-free circuit there can only be 0 and 1 values
-            if (this_state[gate_id * 2] == LOGIC_1) {
+            if (this_state[net_id * 2] == LOGIC_1) {
                 high_count++;
             }
-            if (this_state[gate_id * 2 + 1] == LOGIC_1) {
+            if (this_state[net_id * 2 + 1] == LOGIC_1) {
                 high_count++;
             }
         }
-        fprintf(fp, "%d,%f\n", gate_id, high_count / (2.0 * num_tests));
+        fprintf(fp, "%d,%f\n", net_id, high_count / (2.0 * num_tests));
     }
     printf("\n");
     fclose(fp);
