@@ -895,6 +895,8 @@ int main(int argc, char* argv[])
     printf("\n");
     fclose(fp);
 
+    printf("Finished saving the usage info...\n");
+
 
 
 /*_  ________ _____  _   _ ______ _        ___
@@ -911,7 +913,7 @@ int main(int argc, char* argv[])
     // NEW PLAN: We need to pack this data tighter using BIT_SET_UCHAR
     uint size_fault_activations = divide_round_up(num_tests * num_gates * 2, 8);
     pretty_bytes(buffer, size_fault_activations);
-    printf("We need %s to store %d potential fault activation bits\n", buffer, num_tests * num_gates * 2);
+    printf("We need %s to store %ld potential fault activation bits\n", buffer, ((unsigned long) num_tests) * num_gates * 2);
     uchar* fault_activations = (uchar*) malloc(size_fault_activations);
     assert (fault_activations != NULL);
     memset(fault_activations, 0, size_fault_activations);
