@@ -6,7 +6,7 @@
    Carnegie Mellon University
    Fall 2012
 
-   Last Updated: March 10, 2017
+   Last Updated: March 22, 2017
    Copyright (c) 2013-2017, Matthew Beckler
 
    This program is free software; you can redistribute it and/or modify
@@ -48,8 +48,9 @@
    * There are a number of small optimizations we would like to investigate with regards to array-of-struct vs struct-of-arrays, especially in our gate and test memory storage.
 
    Update log:
-   * Added support for TF faults in addition to just TRAX faults - Aug 2013
+   * Support tracking activity of each net (and therefore PMOS input) over the entire test set - Mar 2017
    * Added support for disabling TRAX hazard activation - Mar 2017
+   * Added support for TF faults in addition to just TRAX faults - Aug 2013
 
 */
 
@@ -600,6 +601,11 @@ int main(int argc, char* argv[])
     sprintf(filename_faults, "%s/%s.faults.gpu", basename, basename);
     printf("Faults filename: '%s'\n", filename_faults);
 
+    char* filename_usage = (char*) malloc(2 * strlen(basename) + 7 + 1); // "c432/c432.usage", so 2*N + 7 for "/.usage" + 1 for the '\0'
+    assert(filename_usage != NULL);
+    sprintf(filename_usage, "%s/%s.usage", basename, basename);
+    printf("Usage filename: '%s'\n", filename_usage);
+
     // Circuit netlist data
     uint num_inputs, num_outputs, num_gates;
     uint* inputs;
@@ -826,8 +832,7 @@ int main(int argc, char* argv[])
     //print_state(fault_free_states, num_state_values);
     //print_state_raw(fault_free_states, num_state_values);
 
-
-    // 1. First, we run a parallel fault simulation to determine the fault-free circuit state for every test pair
+    // Set the input patterns in all fault-free states
     for (uint test_id = 0; test_id < num_tests; test_id++)
     {
         // set the input values in the fault free states
@@ -839,7 +844,8 @@ int main(int argc, char* argv[])
         }
     }
 
-    // now that we have set the input patterns in all the fault-free states, we run the simulations in parallel to find the fault-free circuit states for all tests
+    // Now that we have set the input patterns in all the fault-free states, we run the simulations in parallel to find the fault-free circuit states for all tests
+    // We run a parallel fault simulation to determine the fault-free circuit state for every test pair
 
     // the gpu needs copies of the states and the gates list-of-structs
     uchar* dev_fault_free_states;
@@ -862,6 +868,33 @@ int main(int argc, char* argv[])
     check_cuda_errors("1 (fault free fault simulation)");
     gettimeofday(&tvPostK1, NULL);
     printf("finished with fault-free responses kernel #1\n");
+
+    // For TRAX Multi-Fault Injections we want to get an idea of which gates spend their time outputting 1, which increases NBTI (PMOS are turned on to output 1)
+    cudaMemcpy( fault_free_states, dev_fault_free_states, all_states_size, cudaMemcpyDeviceToHost );
+    check_cuda_errors("(cudaMemcpy dev_fault_free_states to CPU)");
+    //print_state(fault_free_states, num_state_values);
+    //print_state_raw(fault_free_states, num_state_values);
+
+    printf("Analyzing fault-free states to determine usage of %d nets...\n", num_nets);
+    fp = fopen(filename_usage, "w");
+    for (uint net_id = 0; net_id < num_nets; net_id++) {
+        uint high_count = 0;
+        printf("\r%f", (1 + net_id) / (1.0 * num_nets));
+        for (uint test_id = 0; test_id < num_tests; test_id++) {
+            uchar *this_state = fault_free_states + test_id * state_bytes;
+            // In the fault-free circuit there can only be 0 and 1 values
+            if (this_state[net_id * 2] == LOGIC_1) {
+                high_count++;
+            }
+            if (this_state[net_id * 2 + 1] == LOGIC_1) {
+                high_count++;
+            }
+        }
+        fprintf(fp, "%d,%f\n", net_id, high_count / (2.0 * num_tests));
+    }
+    printf("\n");
+    fclose(fp);
+
 
 
 /*_  ________ _____  _   _ ______ _        ___
