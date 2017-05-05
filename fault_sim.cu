@@ -869,19 +869,28 @@ int main(int argc, char* argv[])
     gettimeofday(&tvPostK1, NULL);
     printf("finished with fault-free responses kernel #1\n");
 
+#if 0
     // For TRAX Multi-Fault Injections we want to get an idea of which gates spend their time outputting 1, which increases NBTI (PMOS are turned on to output 1)
     cudaMemcpy( fault_free_states, dev_fault_free_states, all_states_size, cudaMemcpyDeviceToHost );
     check_cuda_errors("(cudaMemcpy dev_fault_free_states to CPU)");
     //print_state(fault_free_states, num_state_values);
     //print_state_raw(fault_free_states, num_state_values);
 
+    uint *count_newly_damaged_at_test = (uint*) malloc(sizeof(uint) * num_tests);
+    memset(count_newly_damaged_at_test, 0, sizeof(uint) * num_tests);
+
+    uint *net_damaged = (uint*) malloc(sizeof(uint) * num_nets);
+    memset(net_damaged, 0, sizeof(uint) * num_nets);
+
     printf("Analyzing fault-free states to determine usage of %d nets...\n", num_nets);
+    uint damage_threshold = (0.7 * 2 * num_tests);
     fp = fopen(filename_usage, "w");
     for (uint net_id = 0; net_id < num_nets; net_id++) {
         uint high_count = 0;
         printf("\r%f", (1 + net_id) / (1.0 * num_nets));
         for (uint test_id = 0; test_id < num_tests; test_id++) {
             uchar *this_state = fault_free_states + test_id * state_bytes;
+            // Need to check both v1 and v2 for each test
             // In the fault-free circuit there can only be 0 and 1 values
             if (this_state[net_id * 2] == LOGIC_1) {
                 high_count++;
@@ -889,13 +898,29 @@ int main(int argc, char* argv[])
             if (this_state[net_id * 2 + 1] == LOGIC_1) {
                 high_count++;
             }
+            // Check if this test has caused this net to go newly-damaged
+            // Accumulating damage when the gate input is low
+            uint low_count = (2 * (test_id + 1)) - high_count;
+            if ((!net_damaged[net_id]) && (low_count == damage_threshold)) {
+                // We've seen more than 70% low counts, it's damaged
+                count_newly_damaged_at_test[test_id] += 1;
+                net_damaged[net_id] = 1;
+            }
         }
         fprintf(fp, "%d,%f\n", net_id, high_count / (2.0 * num_tests));
     }
     printf("\n");
     fclose(fp);
-
     printf("Finished saving the usage info...\n");
+
+    fp = fopen("count_newly_damaged_at_test", "w");
+    for (uint test_id = 0; test_id < num_tests; test_id++) {
+        fprintf(fp, "%d,%d\n", test_id, count_newly_damaged_at_test[test_id]);
+    }
+    fclose(fp);
+
+    exit(1);
+#endif
 
 
 
