@@ -546,7 +546,8 @@ int main(int argc, char* argv[])
 {
     char buffer[100];  // for using pretty_bytes(buffer, numbytes);
 
-    // Track how many bytes we malloc on the CUDA device
+    // Track how many bytes we malloc on the CPU and the CUDA device
+    unsigned long malloc_bytes = 0;
     unsigned long cuda_malloc_bytes = 0;
 
     // I added some timing instrumentation in the code for different sections
@@ -574,16 +575,19 @@ int main(int argc, char* argv[])
 
     char* basename = argv[1]; // something like "c432"
 
+    malloc_bytes += (2 * strlen(basename) + 6 + 1);
     char* filename_input = (char*) malloc(2 * strlen(basename) + 6 + 1); // "c432/c432.v", so 2*N + 6 for "/.easy" + 1 for the '\0'
     assert(filename_input != NULL);
     sprintf(filename_input, "%s/%s.easy", basename, basename);
     printf("Netlist filename: '%s'\n", filename_input);
 
+    malloc_bytes += (2 * strlen(basename) + 12 + 1);
     char* filename_tests = (char*) malloc(2 * strlen(basename) + 12 + 1); // "c432/c432.tests.easy", so 2*N + 12 for "/.tests.easy" + 1 for the '\0'
     assert(filename_tests != NULL);
     sprintf(filename_tests, "%s/%s.tests.easy", basename, basename);
     printf("Tests filename: '%s'\n", filename_tests);
 
+    malloc_bytes += (2 * strlen(basename) + 27 + 1);
     char* filename_dictionary = (char*) malloc(2 * strlen(basename) + 27 + 1); // "c432/c432.dictionary.traxnh.pf.cuda", so 2*N + 27 for "/.dictionary.traxnh.pf.cuda" + 1 for the '\0'
     assert(filename_dictionary != NULL);
     sprintf(filename_dictionary,
@@ -599,11 +603,13 @@ int main(int argc, char* argv[])
     basename, basename);
     printf("Dictionary filename: '%s'\n", filename_dictionary);
 
+    malloc_bytes += (2 * strlen(basename) + 13 + 1);
     char* filename_faults = (char*) malloc(2 * strlen(basename) + 13 + 1); // "c432/c432.faults.gpu", so 2*N + 13 for "/.faults.gpu" + 1 for the '\0'
     assert(filename_faults != NULL);
     sprintf(filename_faults, "%s/%s.faults.gpu", basename, basename);
     printf("Faults filename: '%s'\n", filename_faults);
 
+    malloc_bytes += (2 * strlen(basename) + 7 + 1);
     char* filename_usage = (char*) malloc(2 * strlen(basename) + 7 + 1); // "c432/c432.usage", so 2*N + 7 for "/.usage" + 1 for the '\0'
     assert(filename_usage != NULL);
     sprintf(filename_usage, "%s/%s.usage", basename, basename);
@@ -641,6 +647,7 @@ int main(int argc, char* argv[])
     }
 
     printf("Detected %d inputs\n", num_inputs);
+    malloc_bytes += (sizeof(uint) * num_inputs);
     inputs = (uint*) malloc(sizeof(uint) * num_inputs);
     assert(inputs != NULL);
     for (uint i = 0; i < num_inputs; i++)
@@ -660,6 +667,7 @@ int main(int argc, char* argv[])
     }
 
     printf("Detected %d outputs\n", num_outputs);
+    malloc_bytes += (sizeof(uint) * num_outputs);
     outputs = (uint*) malloc(sizeof(uint) * num_outputs);
     assert(outputs != NULL);
     for (uint i = 0; i < num_outputs; i++)
@@ -681,6 +689,7 @@ int main(int argc, char* argv[])
     // IMPORTANT - We assume that the gates in the file are already in topological order!
     pretty_bytes(buffer, sizeof(Gate) * num_gates);
     printf("Detected %d gates (%s)\n", num_gates, buffer);
+    malloc_bytes += (sizeof(Gate) * num_gates);
     gates = (Gate*) malloc(sizeof(Gate) * num_gates);
     uint type, out, in1, in2;
     for (uint i = 0; i < num_gates; i++)
@@ -725,6 +734,9 @@ int main(int argc, char* argv[])
     printf("Detected %d tests (%s)\n", num_tests, buffer);
 
     // NEW PLAN - Information stored in a compacted format, eight bits per byte, no TestPair structure, just big arrays for v1, v2, and expected, since pointers cost us 8 bytes!
+    malloc_bytes += (size_v1_v2 * num_tests);
+    malloc_bytes += (size_v1_v2 * num_tests);
+    malloc_bytes += (size_expected * num_tests);
     tests_v1 = (uchar*) malloc(size_v1_v2 * num_tests);
     tests_v2 = (uchar*) malloc(size_v1_v2 * num_tests);
     tests_expected = (uchar*) malloc(size_expected * num_tests);
@@ -733,10 +745,13 @@ int main(int argc, char* argv[])
     assert(tests_expected != NULL);
 
     // these buffers are just for reading from the file
+    malloc_bytes += (num_inputs + 1);
     char* buf_v1 = (char*) malloc(num_inputs + 1);
     assert(buf_v1 != NULL);
+    malloc_bytes += (num_inputs + 1);
     char* buf_v2 = (char*) malloc(num_inputs + 1);
     assert(buf_v2 != NULL);
+    malloc_bytes += (num_outputs + 1);
     char* buf_expected = (char*) malloc(num_outputs + 1);
     assert(buf_expected != NULL);
     for (uint test_id = 0; test_id < num_tests; test_id++)
@@ -775,6 +790,7 @@ int main(int argc, char* argv[])
     }
 
     printf("Detected %d faults\n", num_faults);
+    malloc_bytes += (sizeof(Fault) * num_faults);
     faults = (Fault*) malloc(sizeof(Fault) * num_faults);
     assert(faults != NULL);
     uint net, polarity;
@@ -828,6 +844,7 @@ int main(int argc, char* argv[])
     printf("Detected %d nets, requiring %u B per state, %s total\n", num_nets, state_bytes, buffer);
 
     // we allocate a circuit state for each test, and then we find the fault-free values in the circuit for each test
+    malloc_bytes += (all_states_size);
     uchar* fault_free_states = (uchar*) malloc(all_states_size);
     assert(fault_free_states != NULL);
     // let's set the values all to X (X=01, so 01010101, so 0x55) - This uses our new compact format for storing the state information
@@ -944,6 +961,7 @@ int main(int argc, char* argv[])
     uint size_fault_activations = divide_round_up(num_tests * num_gates * 2, 8);
     pretty_bytes(buffer, size_fault_activations);
     printf("We need %s to store %ld potential fault activation bits\n", buffer, ((unsigned long) num_tests) * num_gates * 2);
+    malloc_bytes += (size_fault_activations);
     uchar* fault_activations = (uchar*) malloc(size_fault_activations);
     assert (fault_activations != NULL);
     memset(fault_activations, 0, size_fault_activations);
@@ -993,10 +1011,12 @@ int main(int argc, char* argv[])
     // As noted above, we decided to go with option 1, which seems to be working well for now.
 
     // Need an array of how many tests need to be run (for each fault)
+    malloc_bytes += (sizeof(uint) * num_gates * 2);
     uint* num_fault_activations = (uint*) malloc(sizeof(uint) * num_gates * 2);
     assert(num_fault_activations != NULL);
 
     // This is the array of offsets into the big state table (for each fault)
+    malloc_bytes += (sizeof(uint) * num_gates * 2);
     uint* fault_activations_offset = (uint*) malloc(sizeof(uint) * num_gates * 2);
     assert(fault_activations_offset != NULL);
 
@@ -1008,13 +1028,17 @@ int main(int argc, char* argv[])
 
         uint count = 0;
         for (uint test_id = 0; test_id < num_tests; test_id++)
+        {
             count += BIT_GET_UCHAR(fault_activations, fault_id * num_tests + test_id);
+        }
         num_fault_activations[fault_id] = count;
         //printf("Fault %8d activated by %8d tests\n", fault_id, count);
 
         total_activations += count;
         if (count > max_num_activations)
+        {
             max_num_activations = count;
+        }
     }
     printf("Max num activations: %ld\n", max_num_activations);
     //printf("------------------------------------------------\n");
@@ -1022,6 +1046,7 @@ int main(int argc, char* argv[])
     // let's make an array of the test_id values for each fault, in order for fault_0, then fault_1, etc
     // Note, we can't merge this pair of loops with the very similar pair of loops above, because we need to know total_activations before we can malloc here
     //      It's not a big deal because this part doesn't take much of the time
+    malloc_bytes += (sizeof(uint) * total_activations);
     uint* activating_test_ids = (uint*) malloc(sizeof(uint) * total_activations);
     assert(activating_test_ids != NULL);
     uint array_index = 0;
@@ -1068,6 +1093,7 @@ int main(int argc, char* argv[])
     uint dict_size = divide_round_up(num_faults * num_tests, 8);
     pretty_bytes(buffer, dict_size);
     printf("We require %s for the packed dictionary data (%d faults, %d tests)\n", buffer, num_faults, num_tests);
+    malloc_bytes += dict_size;
     uchar* dict = (uchar*) malloc(dict_size);
     assert(dict != NULL);
     memset(dict, 0, dict_size);
@@ -1080,13 +1106,18 @@ int main(int argc, char* argv[])
     cudaMemcpy(dev_dict, dict, dict_size, cudaMemcpyHostToDevice); // Again, we're copying all 0s from CPU to GPU, can't we just init or cudaMemset? TODO
     check_cuda_errors("pre-3 (cudaMemcpy empty dict to GPU)");
 
+    pretty_bytes(buffer, malloc_bytes);
+    printf("malloc_bytes: %d (%s)\n", malloc_bytes, buffer)
     pretty_bytes(buffer, cuda_malloc_bytes);
     printf("cuda_malloc_bytes: %d (%s)\n", cuda_malloc_bytes, buffer);
 
     struct timeval tvStep;
     gettimeofday(&tvPreK3, NULL);
     gettimeofday(&tvStep, NULL);
+#define USE_CUDA_PROFILER (0)
+#if USE_CUDA_PROFILER
     cudaProfilerStart();
+#endif
     for (uint fault_list_index = 0; fault_list_index < num_faults; fault_list_index++) {
         Fault *fault = &faults[fault_list_index];
         uint fault_id = (fault->net * 2) + fault->polarity;
@@ -1125,7 +1156,9 @@ int main(int argc, char* argv[])
 
         gettimeofday(&tvStep, NULL);
     }
+#if USE_CUDA_PROFILER
     cudaProfilerStop();
+#endif
     gettimeofday(&tvPostK3, NULL);
     printf("\n");
 
