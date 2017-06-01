@@ -546,6 +546,9 @@ int main(int argc, char* argv[])
 {
     char buffer[100];  // for using pretty_bytes(buffer, numbytes);
 
+    // Track how many bytes we malloc on the CUDA device
+    unsigned long cuda_malloc_bytes = 0;
+
     // I added some timing instrumentation in the code for different sections
     struct timeval tvStart, tvDoneParsing, tvPreK1, tvPostK1, tvPreK2, tvPostK2, tvPreK3, tvPostK3, tvEnd, tvDiff;
     gettimeofday(&tvStart, NULL);
@@ -849,6 +852,7 @@ int main(int argc, char* argv[])
 
     // the gpu needs copies of the states and the gates list-of-structs
     uchar* dev_fault_free_states;
+    cuda_malloc_bytes += all_states_size;
     cudaMalloc( (void**)&dev_fault_free_states, all_states_size);
     check_cuda_errors("(cudaMalloc dev_fault_free_states)");
     assert(dev_fault_free_states != NULL);
@@ -856,6 +860,7 @@ int main(int argc, char* argv[])
     check_cuda_errors("(cudaMemcpy dev_fault_free_states to GPU)");
 
     Gate* dev_gates;
+    cuda_malloc_bytes += (sizeof(Gate) * num_gates);
     cudaMalloc( (void**)&dev_gates, sizeof(Gate) * num_gates);
     check_cuda_errors("(cudaMalloc dev_gates)");
     assert(dev_gates != NULL);
@@ -944,6 +949,7 @@ int main(int argc, char* argv[])
     memset(fault_activations, 0, size_fault_activations);
 
     uchar* dev_fault_activations;
+    cuda_malloc_bytes += size_fault_activations;
     cudaMalloc( (void**)&dev_fault_activations, size_fault_activations);
     check_cuda_errors("cudaMalloc (dev_fault_activations)");
     assert(dev_fault_activations != NULL);
@@ -1046,11 +1052,13 @@ int main(int argc, char* argv[])
     // Since kernel 3 now is able to activate the fault (set LOGIC_X in circuit state)
     // No need to copy faulty_states to the CPU, activate the faults, and copy it back to the GPU.
     uchar* dev_faulty_states;
+    cuda_malloc_bytes += all_states_size;
     cudaMalloc( (void**)&dev_faulty_states, all_states_size);
     check_cuda_errors("pre-3 (cudaMalloc faulty_states)");
     assert(dev_faulty_states != NULL);
 
     uint* dev_activating_test_ids;
+    cuda_malloc_bytes += (sizeof(uint) * total_activations);
     cudaMalloc( (void**)&dev_activating_test_ids, sizeof(uint) * total_activations );
     check_cuda_errors("pre-3 (cudaMalloc dev_activating_test_ids)");
     assert(dev_activating_test_ids != NULL);
@@ -1065,11 +1073,15 @@ int main(int argc, char* argv[])
     memset(dict, 0, dict_size);
 
     uchar* dev_dict;
+    cuda_malloc_bytes += (dict_size);
     cudaMalloc( (void**)&dev_dict, dict_size );
     check_cuda_errors("pre-3 (cudaMalloc dev_dict)");
     assert(dev_dict != NULL);
     cudaMemcpy(dev_dict, dict, dict_size, cudaMemcpyHostToDevice); // Again, we're copying all 0s from CPU to GPU, can't we just init or cudaMemset? TODO
     check_cuda_errors("pre-3 (cudaMemcpy empty dict to GPU)");
+
+    pretty_bytes(buffer, cuda_malloc_bytes);
+    printf("cuda_malloc_bytes: %d (%s)\n", cuda_malloc_bytes, buffer);
 
     struct timeval tvStep;
     gettimeofday(&tvPreK3, NULL);
