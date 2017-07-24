@@ -1107,9 +1107,9 @@ int main(int argc, char* argv[])
     check_cuda_errors("pre-3 (cudaMemcpy empty dict to GPU)");
 
     pretty_bytes(buffer, malloc_bytes);
-    printf("malloc_bytes: %d (%s)\n", malloc_bytes, buffer)
+    printf("malloc_bytes: %ld (%s)\n", malloc_bytes, buffer);
     pretty_bytes(buffer, cuda_malloc_bytes);
-    printf("cuda_malloc_bytes: %d (%s)\n", cuda_malloc_bytes, buffer);
+    printf("cuda_malloc_bytes: %ld (%s)\n", cuda_malloc_bytes, buffer);
 
     struct timeval tvStep;
     gettimeofday(&tvPreK3, NULL);
