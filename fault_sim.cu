@@ -401,10 +401,10 @@ __device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_i
 {
     // could we transpose our state matrix to make the accesses align better? TODO
     // Each thread is accessing the same net at the same time, maybe we could make those accesses be coallesced?
-    uchar in1_v1 = my_state[g->in1 * 2];
-    uchar in2_v1 = my_state[g->in2 * 2];
-    uchar in1_v2 = my_state[g->in1 * 2 + 1];
-    uchar in2_v2 = my_state[g->in2 * 2 + 1];
+    uchar in1_v1 = 0x7F & my_state[g->in1 * 2];
+    uchar in2_v1 = 0x7F & my_state[g->in2 * 2];
+    uchar in1_v2 = 0x7F & my_state[g->in1 * 2 + 1];
+    uchar in2_v2 = 0x7F & my_state[g->in2 * 2 + 1];
 
     // Using the new gate evaluation lookup table, we use the gate type and two input values to craft a 7-bit index
     uchar v1 = gate_eval_lut[(g->type << 4) | (in1_v1 << 2) | (in2_v1)];
@@ -485,25 +485,29 @@ __global__ void cuda_check_fault_activations(Gate* gates, uchar* all_states, uin
 // This is Kernel 3, which does the faulty fault simulation. One grid of blocks per fault, FAULTS_PER_BLOCK_KERNEL_3 threads per block, one thread per activating test.
 // NEW PLAN: Update all the states in place, but never copy the faulty states back to the CPU.
 // Instead, we now have the dictionary row in memory and we directly write the pass/fail bit into that memory directly, and then copy it back to the CPU and write it to disk.
-__global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates, uchar* faulty_states, uint state_bytes, uint total_activations)
+__global__ void cuda_faulty_fault_sim(Gate* dev_gates, uint num_gates, uchar* dev_faulty_states, uint state_bytes, uint total_activations)
 {
     uint offset = blockIdx.x * FAULTS_PER_BLOCK_KERNEL_3 + threadIdx.x;
     if (offset < total_activations)
     {
-        uchar* my_state = faulty_states + state_bytes * offset;
+        uchar* my_state = dev_faulty_states + state_bytes * offset;
         // Removed fault activation since it now happens on the CPU
         uchar test_failed = 0; // Local copy since we'll be writing it many times, copy it to final byte of my_state at the end
 
         // We iterate over all the relevant gates, in topological order (this sorting was already handled, our netlist comes pre-sorted)
         for (uint gate_id = 0; gate_id < num_gates; gate_id++)
         {
-            const Gate g = gates[gate_id]; // should be the same for all threads in the kernel
-            uchar v2 = cuda_fault_sim_core(&g, my_state, gate_id);
+            Gate *g = &dev_gates[gate_id]; // should be the same for all threads in the kernel
+            uchar v2 = my_state[gate_id * 2 + 1]; // Existing V2
+            if (!(v2 & 0x80)) {
+                // 0x80 set = "activated fault site" so we don't re-simulate it and un-activate the fault!
+                v2 = cuda_fault_sim_core(g, my_state, gate_id);
+            }
 
         #if USE_TRAX
-            test_failed = (g.is_output && (v2 == LOGIC_X)) ? 1 : test_failed; // If an X reaches an output, the test fails
+            test_failed = (g->is_output && ((0x7F & v2) == LOGIC_X)) ? 1 : test_failed; // If an X reaches an output, the test fails
         #else
-            test_failed = (g.is_output && (v2 != my_state[gate_id * 2 + 1])) ? 1 : test_failed; // If an output does not match the expected (fault-free) value, the test fails
+            test_failed = (g->is_output && (v2 != my_state[gate_id * 2 + 1])) ? 1 : test_failed; // If an output does not match the expected (fault-free) value, the test fails
         #endif
         }
         my_state[state_bytes - 1] = test_failed;
@@ -1037,7 +1041,7 @@ int main(int argc, char* argv[])
     //printf("------------------------------------------------\n");
     printf("total_activations: %ld\n", total_activations);
 
-    uint size_faulty_states = state_bytes * total_activations
+    uint size_faulty_states = state_bytes * total_activations;
     pretty_bytes(buffer, size_faulty_states);
     printf("We require %s for our faulty states!\n", buffer);
     malloc_bytes += (size_faulty_states);
@@ -1060,12 +1064,13 @@ int main(int argc, char* argv[])
                 activating_test_ids[array_index] = test_id;
 
                 // Copy corresponding fault-free test row into the faulty_states array
-                uchar* fault_free_state = fault_free_stats + state_bytes * test_id;
+                uchar* fault_free_state = fault_free_states + state_bytes * test_id;
                 uchar* faulty_state = faulty_states + state_bytes * array_index;
                 memcpy(faulty_state, fault_free_state, state_bytes);
                 // Activate fault in faulty_states
                 uint my_gate_id = fault_id / 2;
-                faulty_state[my_gate_id * 2 + 1] =
+                // 0x80 = "activated fault" so we avoid re-evaluating the gate and losing the activated fault!
+                faulty_state[my_gate_id * 2 + 1] = 0x80 |
                 #if USE_TRAX
                     LOGIC_X; // Activate the fault by marking an X at the fault site in v2
                 #else
@@ -1095,9 +1100,9 @@ int main(int argc, char* argv[])
     memset(dict, 0, dict_size);
 
     pretty_bytes(buffer, malloc_bytes);
-    printf("malloc_bytes: %d (%s)\n", malloc_bytes, buffer)
+    printf("malloc_bytes: %ld (%s)\n", malloc_bytes, buffer);
     pretty_bytes(buffer, cuda_malloc_bytes);
-    printf("cuda_malloc_bytes: %d (%s)\n", cuda_malloc_bytes, buffer);
+    printf("cuda_malloc_bytes: %ld (%s)\n", cuda_malloc_bytes, buffer);
 
     struct timeval tvStep;
     gettimeofday(&tvPreK3, NULL);
@@ -1138,7 +1143,7 @@ int main(int argc, char* argv[])
                 uchar* faulty_state = faulty_states + state_bytes * array_index;
                 if (faulty_state[state_bytes - 1]) {
                     // fail
-                    BIT_SET_UCHAR(dict, fault_id * num_tests + test_id);
+                    BIT_SET_UCHAR(dict, fault_id * num_tests + test_id, 1);
                 }
 
                 array_index++;
@@ -1198,8 +1203,6 @@ int main(int argc, char* argv[])
     cudaFree(dev_gates);
     cudaFree(dev_fault_activations);
     cudaFree(dev_faulty_states);
-    cudaFree(dev_activating_test_ids);
-    cudaFree(dev_dict);
 
     // free up the allocated CPU memory
     // TODO double-check all these CPU-side free calls again!
