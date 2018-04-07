@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License along
 with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+A good high-level introduction to what this actually is is found in the file [project_report.pdf](./project_report.pdf).
 
 First, circuit designs must be converted into the right "easy" format for use by the GPU fault simulator. Use `python convert_to_easy_format.py c432`, for example. Then you can use `python ref/fault_sim.py c432` to run the very slow reference implementation. Then use `./build.sh` to build the three variants of the GPU code. Then TODO.
 
