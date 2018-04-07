@@ -48,6 +48,7 @@
    * There are a number of small optimizations we would like to investigate with regards to array-of-struct vs struct-of-arrays, especially in our gate and test memory storage.
 
    Update log:
+   * Ignore the skip-ahead optimization for Kernel 3, and the N invocations of Kernel 3, by doing one giant Kernel 3 invocation.
    * Support tracking activity of each net (and therefore PMOS input) over the entire test set - Mar 2017
    * Added support for disabling TRAX hazard activation - Mar 2017
    * Added support for TF faults in addition to just TRAX faults - Aug 2013
@@ -400,10 +401,10 @@ __device__ uchar cuda_fault_sim_core(const Gate* g, uchar* my_state, uint gate_i
 {
     // could we transpose our state matrix to make the accesses align better? TODO
     // Each thread is accessing the same net at the same time, maybe we could make those accesses be coallesced?
-    uchar in1_v1 = my_state[g->in1 * 2];
-    uchar in2_v1 = my_state[g->in2 * 2];
-    uchar in1_v2 = my_state[g->in1 * 2 + 1];
-    uchar in2_v2 = my_state[g->in2 * 2 + 1];
+    uchar in1_v1 = 0x7F & my_state[g->in1 * 2];
+    uchar in2_v1 = 0x7F & my_state[g->in2 * 2];
+    uchar in1_v2 = 0x7F & my_state[g->in1 * 2 + 1];
+    uchar in2_v2 = 0x7F & my_state[g->in2 * 2 + 1];
 
     // Using the new gate evaluation lookup table, we use the gate type and two input values to craft a 7-bit index
     uchar v1 = gate_eval_lut[(g->type << 4) | (in1_v1 << 2) | (in2_v1)];
@@ -484,41 +485,32 @@ __global__ void cuda_check_fault_activations(Gate* gates, uchar* all_states, uin
 // This is Kernel 3, which does the faulty fault simulation. One grid of blocks per fault, FAULTS_PER_BLOCK_KERNEL_3 threads per block, one thread per activating test.
 // NEW PLAN: Update all the states in place, but never copy the faulty states back to the CPU.
 // Instead, we now have the dictionary row in memory and we directly write the pass/fail bit into that memory directly, and then copy it back to the CPU and write it to disk.
-__global__ void cuda_faulty_fault_sim(Gate* gates, uint num_gates,
-                                      uchar* faulty_states, uint state_bytes,
-                                      uint my_num_fault_activations, uint my_activations_offset, uint* activating_test_ids,
-                                      uchar* dict, uint fault_list_index, uint num_tests, uint fault_id)
+__global__ void cuda_faulty_fault_sim(Gate* dev_gates, uint num_gates, uchar* dev_faulty_states, uint state_bytes, uint total_activations)
 {
-    uint test_offset = blockIdx.x * FAULTS_PER_BLOCK_KERNEL_3 + threadIdx.x;
-    if (test_offset < my_num_fault_activations)
+    uint offset = blockIdx.x * FAULTS_PER_BLOCK_KERNEL_3 + threadIdx.x;
+    if (offset < total_activations)
     {
-        uint test_id = activating_test_ids[my_activations_offset + test_offset];
-        uchar* my_state = faulty_states + state_bytes * test_id;
-        uint my_gate_id = fault_id / 2; // We only have to start simulating at the fault site, due to the gate ordering!
-
-        my_state[my_gate_id * 2 + 1] = 
-        #if USE_TRAX
-            LOGIC_X; // Activate the fault by marking an X at the fault site in v2
-        #else
-            my_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition)
-        #endif
-
-        uchar test_failed = (gates[my_gate_id].is_output ? 1 : 0); // local copy since we'll be writing it many times, copy it to dict[fault_id * num_tests + test_id] eventually.
+        uchar* my_state = dev_faulty_states + state_bytes * offset;
+        // Removed fault activation since it now happens on the CPU
+        uchar test_failed = 0; // Local copy since we'll be writing it many times, copy it to final byte of my_state at the end
 
         // We iterate over all the relevant gates, in topological order (this sorting was already handled, our netlist comes pre-sorted)
-        for (uint gate_id = my_gate_id + 1; gate_id < num_gates; gate_id++) // Oh duh, start with the next gate, don't re-evaluate the gate where we just activated a fault (since it will un-activate it!)
+        for (uint gate_id = 0; gate_id < num_gates; gate_id++)
         {
-            const Gate g = gates[gate_id]; // should be the same for all threads in the kernel
-            uchar v2 = cuda_fault_sim_core(&g, my_state, gate_id);
+            Gate *g = &dev_gates[gate_id]; // should be the same for all threads in the kernel
+            uchar v2 = my_state[gate_id * 2 + 1]; // Existing V2
+            if (!(v2 & 0x80)) {
+                // 0x80 set = "activated fault site" so we don't re-simulate it and un-activate the fault!
+                v2 = cuda_fault_sim_core(g, my_state, gate_id);
+            }
 
         #if USE_TRAX
-            test_failed = (g.is_output && (v2 == LOGIC_X)) ? 1 : test_failed; // If an X reaches an output, the test fails
+            test_failed = (g->is_output && ((0x7F & v2) == LOGIC_X)) ? 1 : test_failed; // If an X reaches an output, the test fails
         #else
-            test_failed = (g.is_output && (v2 != my_state[gate_id * 2 + 1])) ? 1 : test_failed; // If an output does not match the expected (fault-free) value, the test fails
+            test_failed = (g->is_output && (v2 != my_state[gate_id * 2 + 1])) ? 1 : test_failed; // If an output does not match the expected (fault-free) value, the test fails
         #endif
         }
-        uint index = (fault_list_index * num_tests) + test_id;
-        atomicOr( ((uint*)dict) + (index / 32), test_failed << (index % 32)); // TODO make this much better or something, cripes
+        my_state[state_bytes - 1] = test_failed;
     }
 }
 
@@ -838,7 +830,7 @@ int main(int argc, char* argv[])
     // We need to store the circuit state (v1 and v2 values for all nets) for all tests.
     uint num_nets = num_inputs + num_gates;
     uint num_state_values = num_nets * 2; // times 2, since we have v1 and v2 state! see explanation above
-    uint state_bytes = num_state_values; // weird, but it works
+    uint state_bytes = num_state_values + 1; // weird, but it works - Plus 1 for the extra byte at the end to track detected/not-detected.
     uint all_states_size = state_bytes * num_tests; // number of bytes required to store a state for each test
     pretty_bytes(buffer, all_states_size);
     printf("Detected %d nets, requiring %u B per state, %s total\n", num_nets, state_bytes, buffer);
@@ -855,8 +847,12 @@ int main(int argc, char* argv[])
     // Set the input patterns in all fault-free states
     for (uint test_id = 0; test_id < num_tests; test_id++)
     {
-        // set the input values in the fault free states
         uchar* this_state = fault_free_states + test_id * state_bytes;
+
+        // Clear the detected byte for this test
+        this_state[state_bytes - 1] = 0;
+
+        // set the input values in the fault free states
         for (uint input_id = 0; input_id < num_inputs; input_id++)
         {
             this_state[inputs[input_id] * 2]     = (BIT_GET_UCHAR(tests_v1 + size_v1_v2 * test_id, input_id) == 0 ? LOGIC_0 : LOGIC_1);
@@ -891,10 +887,10 @@ int main(int argc, char* argv[])
     gettimeofday(&tvPostK1, NULL);
     printf("finished with fault-free responses kernel #1\n");
 
-#if 0
-    // For TRAX Multi-Fault Injections we want to get an idea of which gates spend their time outputting 1, which increases NBTI (PMOS are turned on to output 1)
     cudaMemcpy( fault_free_states, dev_fault_free_states, all_states_size, cudaMemcpyDeviceToHost );
     check_cuda_errors("(cudaMemcpy dev_fault_free_states to CPU)");
+#if 0
+    // For TRAX Multi-Fault Injections we want to get an idea of which gates spend their time outputting 1, which increases NBTI (PMOS are turned on to output 1)
     //print_state(fault_free_states, num_state_values);
     //print_state_raw(fault_free_states, num_state_values);
 
@@ -1009,6 +1005,7 @@ int main(int argc, char* argv[])
     //    - Need to allocate num_activations * state_bytes bytes of memory (which can be huge)
     //    + Only one kernel invocation, so we avoid any/all overhead with kernel calls
     // As noted above, we decided to go with option 1, which seems to be working well for now.
+    // UPDATE MAY 2017 - This was possibly a bad plan. There is a lot of overhead in each kernel invocation. Going to try option 2 now.
 
     // Need an array of how many tests need to be run (for each fault)
     malloc_bytes += (sizeof(uint) * num_gates * 2);
@@ -1042,6 +1039,14 @@ int main(int argc, char* argv[])
     }
     printf("Max num activations: %ld\n", max_num_activations);
     //printf("------------------------------------------------\n");
+    printf("total_activations: %ld\n", total_activations);
+
+    uint size_faulty_states = state_bytes * total_activations;
+    pretty_bytes(buffer, size_faulty_states);
+    printf("We require %s for our faulty states!\n", buffer);
+    malloc_bytes += (size_faulty_states);
+    uchar* faulty_states = (uchar*) malloc(size_faulty_states);
+    assert(faulty_states != NULL);
 
     // let's make an array of the test_id values for each fault, in order for fault_0, then fault_1, etc
     // Note, we can't merge this pair of loops with the very similar pair of loops above, because we need to know total_activations before we can malloc here
@@ -1057,38 +1062,34 @@ int main(int argc, char* argv[])
             if (BIT_GET_UCHAR(fault_activations, fault_id * num_tests + test_id))
             {
                 activating_test_ids[array_index] = test_id;
+
+                // Copy corresponding fault-free test row into the faulty_states array
+                uchar* fault_free_state = fault_free_states + state_bytes * test_id;
+                uchar* faulty_state = faulty_states + state_bytes * array_index;
+                memcpy(faulty_state, fault_free_state, state_bytes);
+                // Activate fault in faulty_states
+                uint my_gate_id = fault_id / 2;
+                // 0x80 = "activated fault" so we avoid re-evaluating the gate and losing the activated fault!
+                faulty_state[my_gate_id * 2 + 1] = 0x80 |
+                #if USE_TRAX
+                    LOGIC_X; // Activate the fault by marking an X at the fault site in v2
+                #else
+                    faulty_state[my_gate_id * 2]; // Activate the fault by copying-in the v1 value (infinitely delayed transition)
+                #endif
+
                 array_index += 1;
             }
         }
     }
 
-    // NEW PLAN - Eventually we'll have > 512 activations per fault, so we have to move to a new kernel 3 architecture.
-    // Let's have one kernel-3 invocation per fault, with FAULTS_PER_BLOCK_KERNEL_3 threads (tests) per block, and as many blocks as we need.
-    // We don't have to have as much memory here to hold all the faulty states, just as many as the maximum number of activations for a given fault.
-
-    // Now we have to allocate a boat-load of memory to store all the circuit states for all the faults for all tests.
-    // Before, we only stored max_num_activations circuit states, but that meant we had to do a lot of tiny isolated memcopies which is really slow.
-    // New plan is to allocate all num_tests circuit states, and have each thread use one of those states. Some states will not be touched
-    // we only need to store max_num_activations_for_single_fault circuit states.
-    pretty_bytes(buffer, all_states_size);
-    printf("We require %s for our faulty states!\n", buffer);
-    uchar* faulty_states = (uchar*) malloc(all_states_size);
-    assert(faulty_states != NULL);
-    // Since kernel 3 now is able to activate the fault (set LOGIC_X in circuit state)
-    // No need to copy faulty_states to the CPU, activate the faults, and copy it back to the GPU.
+    // May 2017 PLAN - There's too much overhead with each kernel 3 invocation, so let's try to do one gigantic parallel simulation of all the activated faults.
+    // We copy fault-free test rows from the fault-free circuit stats array based on the activating_test_ids array above, then activate the faults,
+    // then simulate the circuits in parallel, then copy back the faulty circuit stats, and finally generate the dictionary data.
     uchar* dev_faulty_states;
-    cuda_malloc_bytes += all_states_size;
-    cudaMalloc( (void**)&dev_faulty_states, all_states_size);
+    cuda_malloc_bytes += size_faulty_states;
+    cudaMalloc( (void**)&dev_faulty_states, size_faulty_states);
     check_cuda_errors("pre-3 (cudaMalloc faulty_states)");
     assert(dev_faulty_states != NULL);
-
-    uint* dev_activating_test_ids;
-    cuda_malloc_bytes += (sizeof(uint) * total_activations);
-    cudaMalloc( (void**)&dev_activating_test_ids, sizeof(uint) * total_activations );
-    check_cuda_errors("pre-3 (cudaMalloc dev_activating_test_ids)");
-    assert(dev_activating_test_ids != NULL);
-    cudaMemcpy(dev_activating_test_ids, activating_test_ids, sizeof(uint) * total_activations, cudaMemcpyHostToDevice);
-    check_cuda_errors("pre-3 (cudaMemcpy dev_activating_test_ids into GPU)");
 
     uint dict_size = divide_round_up(num_faults * num_tests, 8);
     pretty_bytes(buffer, dict_size);
@@ -1098,18 +1099,10 @@ int main(int argc, char* argv[])
     assert(dict != NULL);
     memset(dict, 0, dict_size);
 
-    uchar* dev_dict;
-    cuda_malloc_bytes += (dict_size);
-    cudaMalloc( (void**)&dev_dict, dict_size );
-    check_cuda_errors("pre-3 (cudaMalloc dev_dict)");
-    assert(dev_dict != NULL);
-    cudaMemcpy(dev_dict, dict, dict_size, cudaMemcpyHostToDevice); // Again, we're copying all 0s from CPU to GPU, can't we just init or cudaMemset? TODO
-    check_cuda_errors("pre-3 (cudaMemcpy empty dict to GPU)");
-
     pretty_bytes(buffer, malloc_bytes);
-    printf("malloc_bytes: %d (%s)\n", malloc_bytes, buffer)
+    printf("malloc_bytes: %ld (%s)\n", malloc_bytes, buffer);
     pretty_bytes(buffer, cuda_malloc_bytes);
-    printf("cuda_malloc_bytes: %d (%s)\n", cuda_malloc_bytes, buffer);
+    printf("cuda_malloc_bytes: %ld (%s)\n", cuda_malloc_bytes, buffer);
 
     struct timeval tvStep;
     gettimeofday(&tvPreK3, NULL);
@@ -1118,53 +1111,47 @@ int main(int argc, char* argv[])
 #if USE_CUDA_PROFILER
     cudaProfilerStart();
 #endif
-    for (uint fault_list_index = 0; fault_list_index < num_faults; fault_list_index++) {
-        Fault *fault = &faults[fault_list_index];
-        uint fault_id = (fault->net * 2) + fault->polarity;
+    // Copy the activated faulty states from cpu to gpu
+    cudaMemcpy(dev_faulty_states, faulty_states, size_faulty_states, cudaMemcpyHostToDevice);
+    check_cuda_errors("pre-3 (cudaMemcpy faulty_states -> dev_faulty_states - CPU-to-GPU)");
 
-        // it may be the case that there are no fault activations, in which case we just don't run the kernel
-        if (num_fault_activations[fault_id] > 0) {
-            // copy a fresh copy of the fault-free states into the faulty_states
-            cudaMemcpy(dev_faulty_states, dev_fault_free_states, all_states_size, cudaMemcpyDeviceToDevice);
-            check_cuda_errors("pre-3 (cudaMemcpy dev_fault_free_states -> dev_faulty_states - GPU-to-GPU)");
-            cudaDeviceSynchronize();
+    // Run kernel 3
+    cudaDeviceSynchronize(); //TODO what's this for?
+    uint num_blocks = divide_round_up(total_activations, FAULTS_PER_BLOCK_KERNEL_3);
+    cuda_faulty_fault_sim<<< num_blocks, FAULTS_PER_BLOCK_KERNEL_3 >>>(dev_gates, num_gates, dev_faulty_states, state_bytes, total_activations);
+    check_cuda_errors("3 (faulty fault sim)");
+    cudaDeviceSynchronize(); //TODO what's this for?
 
-            uint my_activations_offset = fault_activations_offset[fault_id]; // Where we have to start in the dev_activating_test_ids for this fault
-            uint num_blocks = divide_round_up(num_fault_activations[fault_id], FAULTS_PER_BLOCK_KERNEL_3);
-            cuda_faulty_fault_sim<<< num_blocks, FAULTS_PER_BLOCK_KERNEL_3 >>>(dev_gates, num_gates, dev_faulty_states, state_bytes, num_fault_activations[fault_id], my_activations_offset, dev_activating_test_ids, dev_dict, fault_list_index, num_tests, fault_id);
-            check_cuda_errors("3 (faulty fault sim)");
-            cudaDeviceSynchronize();
-        }
+    // Copy the faulty states from gpu to cpu
+    cudaMemcpy(faulty_states, dev_faulty_states, size_faulty_states, cudaMemcpyDeviceToHost);
+    check_cuda_errors("post-3 (cudaMemcpy dev_faulty_states -> faulty_states - GPU-to-CPU)");
 
-        float progress = (fault_list_index + 1) / (1.0 * num_faults);
-        struct timeval tvNow, tvTemp;
-        gettimeofday(&tvNow, NULL);
-
-        // step = tvNow - time_step
-        timeval_subtract(&tvTemp, &tvNow, &tvStep);
-        // time_so_far = tvNow - time_start
-        timeval_subtract(&tvDiff, &tvNow, &tvPreK3);
-
-        unsigned long int time_so_far_us = tvDiff.tv_usec + 1000000 * tvDiff.tv_sec;
-        unsigned long int time_left_us = (long int)(((1 - progress) * time_so_far_us) / progress);
-        printf("\rFault id %6d, %6d activations (%6d / %6d = %3.6f - %ld.%06ld total, %ld.%06ld step, %ld left)",
-               fault_id, num_fault_activations[fault_id],
-               fault_list_index + 1, num_faults, progress,
-               tvDiff.tv_sec, tvDiff.tv_usec,
-               tvTemp.tv_sec, tvTemp.tv_usec,
-               time_left_us / 1000000);
-
-        gettimeofday(&tvStep, NULL);
-    }
 #if USE_CUDA_PROFILER
     cudaProfilerStop();
 #endif
     gettimeofday(&tvPostK3, NULL);
     printf("\n");
 
-    // now write the dictionary data to disk
-    cudaMemcpy(dict, dev_dict, dict_size, cudaMemcpyDeviceToHost);
-    check_cuda_errors("post-3 (copying dictionary to CPU)");
+    // Analyze the faulty states to generate the pass/fail dictionary data
+    array_index = 0;
+    for (uint fault_id = 0; fault_id < num_gates * 2; fault_id++)
+    {
+        for (uint test_id = 0; test_id < num_tests; test_id++)
+        {
+            if (BIT_GET_UCHAR(fault_activations, fault_id * num_tests + test_id))
+            {
+                uchar* faulty_state = faulty_states + state_bytes * array_index;
+                if (faulty_state[state_bytes - 1]) {
+                    // fail
+                    BIT_SET_UCHAR(dict, fault_id * num_tests + test_id, 1);
+                }
+
+                array_index++;
+            }
+        }
+    }
+
+    // Now, write the dictionary data to disk.
     fp = fopen(filename_dictionary, "w");
     for (uint fault_list_index = 0; fault_list_index < num_faults; fault_list_index++)
     {
@@ -1216,8 +1203,6 @@ int main(int argc, char* argv[])
     cudaFree(dev_gates);
     cudaFree(dev_fault_activations);
     cudaFree(dev_faulty_states);
-    cudaFree(dev_activating_test_ids);
-    cudaFree(dev_dict);
 
     // free up the allocated CPU memory
     // TODO double-check all these CPU-side free calls again!
