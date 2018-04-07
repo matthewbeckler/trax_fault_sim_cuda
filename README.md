@@ -16,6 +16,9 @@ You should have received a copy of the GNU General Public License along
 with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+
+First, circuit designs must be converted into the right "easy" format for use by the GPU fault simulator.
+
 For more information about this GPU fault simulator:
 
  * M. Beckler and R. D. S. Blanton, "GPU-accelerated fault dictionary generation for the TRAX fault model," 2017 International Test Conference in Asia (ITC-Asia), Taipei, 2017, pp. 34-39. - doi: 10.1109/ITC-ASIA.2017.8097107 - https://doi.org/10.1109/ITC-ASIA.2017.8097107
